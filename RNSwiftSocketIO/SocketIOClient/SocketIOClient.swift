@@ -46,7 +46,7 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
     
     public let socketURL:String
     public let handleAckQueue = dispatch_queue_create("handleAckQueue", DISPATCH_QUEUE_SERIAL)
-    public let handleQueue = dispatch_queue_create("handleQueue", DISPATCH_QUEUE_SERIAL)
+    public let handleQueue: dispatch_queue_attr_t!
     public let emitQueue = dispatch_queue_create("emitQueue", DISPATCH_QUEUE_SERIAL)
     public var closed:Bool {
         return _closed
@@ -121,6 +121,12 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
             self.reconnectWait = abs(reconnectWait)
         }
         
+        if let handleQueue = opts?["handleQueue"] as? dispatch_queue_t {
+            self.handleQueue = handleQueue
+        } else {
+            self.handleQueue = dispatch_get_main_queue()
+        }
+        
         super.init()
     }
     
@@ -139,6 +145,11 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
         engine = SocketEngine(client: self, opts: opts)
     }
     
+    private func clearReconnectTimer() {
+        reconnectTimer?.invalidate()
+        reconnectTimer = nil
+    }
+    
     /**
     Closes the socket. Only reopen the same socket if you know what you're doing.
     Will turn off automatic reconnects.
@@ -152,7 +163,6 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
         _connected = false
         _reconnecting = false
         engine?.close(fast: fast)
-        engine = nil
     }
     
     /**
@@ -222,8 +232,7 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
         _connecting = false
         _reconnecting = false
         currentReconnectAttempt = 0
-        reconnectTimer?.invalidate()
-        reconnectTimer = nil
+        clearReconnectTimer()
         
         // Don't handle as internal because something crazy could happen where
         // we disconnect before it's handled
@@ -389,7 +398,7 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
                 args: event, data ?? "")
             
             if anyHandler != nil {
-                dispatch_async(dispatch_get_main_queue()) {[weak self] in
+                dispatch_async(handleQueue) {[weak self] in
                     self?.anyHandler?(SocketAnyEvent(event: event, items: data))
                 }
             }
@@ -397,9 +406,13 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
             for handler in handlers {
                 if handler.event == event {
                     if ack != nil {
-                        handler.executeCallback(data, withAck: ack!, withSocket: self)
+                        dispatch_async(handleQueue) {[weak self] in
+                            handler.executeCallback(data, withAck: ack!, withSocket: self)
+                        }
                     } else {
-                        handler.executeCallback(data)
+                        dispatch_async(handleQueue) {[weak self] in
+                            handler.executeCallback(data)
+                        }
                     }
                 }
             }
@@ -446,6 +459,14 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
     }
     
     /**
+    Removes all handlers.
+    Can be used after disconnecting to break any potential remaining retain cycles.
+    */
+    public func removeAllHandlers() {
+        handlers.removeAll(keepCapacity: false)
+    }
+    
+    /**
     Adds a handler that will be called on every event.
     */
     public func onAny(handler:(SocketAnyEvent) -> Void) {
@@ -481,8 +502,10 @@ public final class SocketIOClient: NSObject, SocketEngineClient, SocketLogClient
     
     // We lost connection and should attempt to reestablish
     @objc private func tryReconnect() {
-        if reconnectAttempts != -1 && currentReconnectAttempt + 1 > reconnectAttempts {
+        if reconnectAttempts != -1 && currentReconnectAttempt + 1 > reconnectAttempts || !reconnects {
+            clearReconnectTimer()
             didDisconnect("Reconnect Failed")
+            
             return
         } else if connected {
             _connecting = false

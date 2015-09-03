@@ -37,6 +37,7 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
     
     private var closed = false
     private var _connected = false
+    private var extraHeaders:[String: String]?
     private var fastUpgrade = false
     private var forcePolling = false
     private var forceWebsockets = false
@@ -98,7 +99,7 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
     
     public init(client:SocketEngineClient, sessionDelegate:NSURLSessionDelegate?) {
         self.client = client
-        self.session = NSURLSession(configuration: NSURLSessionConfiguration.ephemeralSessionConfiguration(),
+        self.session = NSURLSession(configuration: NSURLSessionConfiguration.defaultSessionConfiguration(),
             delegate: sessionDelegate, delegateQueue: workQueue)
     }
     
@@ -109,6 +110,7 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
         cookies = opts?["cookies"] as? [NSHTTPCookie]
         log = opts?["log"] as? Bool ?? false
         socketPath = opts?["path"] as? String ?? ""
+        extraHeaders = opts?["extraHeaders"] as? [String: String]
     }
     
     deinit {
@@ -192,8 +194,17 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
     }
     
     private func createWebsocket(andConnect connect:Bool) {
-        ws = WebSocket(url: NSURL(string: urlWebSocket! + "&sid=\(sid)")!,
+        let wsUrl = urlWebSocket! + (sid == "" ? "" : "&sid=\(sid)")
+        
+        ws = WebSocket(url: NSURL(string: wsUrl)!,
             cookies: cookies)
+        
+        if extraHeaders != nil {
+            for (headerName, value) in extraHeaders! {
+                ws?.headers[headerName] = value
+            }
+        }
+        
         ws?.queue = handleQueue
         ws?.delegate = self
         
@@ -227,6 +238,12 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
         if cookies != nil {
             let headers = NSHTTPCookie.requestHeaderFieldsWithCookies(cookies!)
             req.allHTTPHeaderFields = headers
+        }
+        
+        if extraHeaders != nil {
+            for (headerName, value) in extraHeaders! {
+                req.setValue(value, forHTTPHeaderField: headerName)
+            }
         }
         
         doRequest(req)
@@ -397,16 +414,24 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
         if let json = NSJSONSerialization.JSONObjectWithData(mesData,
             options: NSJSONReadingOptions.AllowFragments,
             error: &err) as? NSDictionary, sid = json["sid"] as? String {
+                let upgradeWs: Bool
+                
                 self.sid = sid
                 _connected = true
                 
-                if !forcePolling && !forceWebsockets {
-                    createWebsocket(andConnect: true)
+                if let upgrades = json["upgrades"] as? [String] {
+                    upgradeWs = upgrades.filter {$0 == "websocket"}.count != 0
+                } else {
+                    upgradeWs = false
                 }
                 
                 if let pingInterval = json["pingInterval"] as? Double, pingTimeout = json["pingTimeout"] as? Double {
                     self.pingInterval = pingInterval / 1000.0
                     self.pingTimeout = pingTimeout / 1000.0
+                }
+                
+                if !forcePolling && !forceWebsockets && upgradeWs {
+                    createWebsocket(andConnect: true)
                 }
         } else {
             client?.didError("Engine failed to handshake")
@@ -475,6 +500,12 @@ public final class SocketEngine: NSObject, WebSocketDelegate, SocketLogClient {
         if cookies != nil {
             let headers = NSHTTPCookie.requestHeaderFieldsWithCookies(cookies!)
             reqPolling.allHTTPHeaderFields = headers
+        }
+        
+        if extraHeaders != nil {
+            for (headerName, value) in extraHeaders! {
+                reqPolling.setValue(value, forHTTPHeaderField: headerName)
+            }
         }
         
         doRequest(reqPolling)

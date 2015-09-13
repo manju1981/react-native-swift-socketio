@@ -3,9 +3,13 @@
 var React = require('react-native');
 
 var {
-  DeviceEventEmitter,
-  SocketIO
+    SocketIO
+} = require('react-native').NativeModules;
+
+var {
+  DeviceEventEmitter
 } = React;
+
 
 class Socket {
   constructor (host, config) {
